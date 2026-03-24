@@ -18,14 +18,24 @@ from .vts_discovery import auto_discover, get_install_info
 
 logger = logging.getLogger("astrbot.plugin.vtube_studio")
 
-# AstrBot 日志格式需要 plugin_tag，添加默认值
+# AstrBot 日志格式需要 plugin_tag 和 short_levelname
 PLUGIN_TAG = "VTS"
+
+# 日志级别到 short_levelname 的映射
+LEVEL_MAP = {
+    "debug": "DEBUG",
+    "info": "INFO",
+    "warning": "WARN",
+    "error": "ERROR",
+    "critical": "CRITICAL",
+}
 
 
 def _log(level, msg, *args, **kwargs):
-    """封装日志调用，确保包含 plugin_tag"""
+    """封装日志调用，确保包含 AstrBot 所需的字段"""
     extra = kwargs.pop("extra", {})
     extra.setdefault("plugin_tag", PLUGIN_TAG)
+    extra.setdefault("short_levelname", LEVEL_MAP.get(level, level.upper()))
     getattr(logger, level)(msg, *args, extra=extra, **kwargs)
 
 
@@ -39,6 +49,10 @@ def _warning(msg, *args, **kwargs):
 
 def _error(msg, *args, **kwargs):
     _log("error", msg, *args, **kwargs)
+
+
+def _debug(msg, *args, **kwargs):
+    _log("debug", msg, *args, **kwargs)
 
 
 # 默认配置
