@@ -18,6 +18,29 @@ from .vts_discovery import auto_discover, get_install_info
 
 logger = logging.getLogger("astrbot.plugin.vtube_studio")
 
+# AstrBot 日志格式需要 plugin_tag，添加默认值
+PLUGIN_TAG = "VTS"
+
+
+def _log(level, msg, *args, **kwargs):
+    """封装日志调用，确保包含 plugin_tag"""
+    extra = kwargs.pop("extra", {})
+    extra.setdefault("plugin_tag", PLUGIN_TAG)
+    getattr(logger, level)(msg, *args, extra=extra, **kwargs)
+
+
+def _info(msg, *args, **kwargs):
+    _log("info", msg, *args, **kwargs)
+
+
+def _warning(msg, *args, **kwargs):
+    _log("warning", msg, *args, **kwargs)
+
+
+def _error(msg, *args, **kwargs):
+    _log("error", msg, *args, **kwargs)
+
+
 # 默认配置
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8001
@@ -138,7 +161,7 @@ class VTubeStudioPlugin(Star):
         if self._auto_connect:
             await self._try_connect()
         else:
-            logger.info("[VTS] auto_connect 关闭，跳过自动连接")
+            _info("[VTS] auto_connect 关闭，跳过自动连接")
 
     async def _discover(self) -> tuple:
         """
@@ -149,21 +172,21 @@ class VTubeStudioPlugin(Star):
         """
         # 手动指定了地址，直接用
         if self._manual_host and self._manual_port:
-            logger.info(
+            _info(
                 f"[VTS] 使用手动配置：{self._manual_host}:{self._manual_port}"
             )
             return self._manual_host, self._manual_port
 
         # 开启了自动发现
         if self._auto_discover:
-            logger.info(
-                f"[VTS] 开启自动发现，开始扫描 VTube Studio "
-                f"（当前平台: {platform.system()}）"
-            )
+                _info(
+                    f"[VTS] 开启自动发现，开始扫描 VTube Studio "
+                    f"（当前平台: {platform.system()}）"
+                )
         host, port = await auto_discover(
             host=self._manual_host or DEFAULT_HOST
         )
-        logger.info(f"[VTS] 自动发现结果：{host}:{port}")
+        _info(f"[VTS] 自动发现结果：{host}:{port}")
         return host, port
 
     async def _try_connect(self):
@@ -174,11 +197,11 @@ class VTubeStudioPlugin(Star):
                 ok = await self.vts.authenticate(saved_token)
                 if ok:
                     self._connected = True
-                    logger.info("[VTS] 使用已保存 Token 认证成功")
+                    _info("[VTS] 使用已保存 Token 认证成功")
                     return
-            logger.info("[VTS] 未找到有效 Token，请发送 /vts_auth 进行认证")
+            _info("[VTS] 未找到有效 Token，请发送 /vts_auth 进行认证")
         except Exception as e:
-            logger.warning(
+            _warning(
                 f"[VTS] 自动连接失败（VTube Studio 可能未启动）: {e}"
             )
 

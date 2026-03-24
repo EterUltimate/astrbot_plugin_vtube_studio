@@ -23,6 +23,28 @@ from typing import List, Optional, Tuple
 
 logger = logging.getLogger("astrbot.plugin.vtube_studio.discovery")
 
+# AstrBot 日志格式需要 plugin_tag，添加默认值
+PLUGIN_TAG = "VTS"
+
+
+def _log(level, msg, *args, **kwargs):
+    """封装日志调用，确保包含 plugin_tag"""
+    extra = kwargs.pop("extra", {})
+    extra.setdefault("plugin_tag", PLUGIN_TAG)
+    getattr(logger, level)(msg, *args, extra=extra, **kwargs)
+
+
+def _info(msg, *args, **kwargs):
+    _log("info", msg, *args, **kwargs)
+
+
+def _warning(msg, *args, **kwargs):
+    _log("warning", msg, *args, **kwargs)
+
+
+def _debug(msg, *args, **kwargs):
+    _log("debug", msg, *args, **kwargs)
+
 # VTube Studio 默认/备用端口范围
 VTS_DEFAULT_PORT = 8001
 VTS_SCAN_PORTS = list(range(8001, 8011))  # 8001~8010
@@ -144,7 +166,7 @@ async def _is_vts_websocket(host: str, port: int) -> bool:
 
 async def scan_ports(host: str = "localhost") -> Optional[int]:
     """扫描 VTS 常用端口范围，返回第一个响应 VTS API 的端口"""
-    logger.info(f"[发现] 扫描端口 {VTS_SCAN_PORTS[0]}~{VTS_SCAN_PORTS[-1]} on {host} ...")
+    _info(f"[发现] 扫描端口 {VTS_SCAN_PORTS[0]}~{VTS_SCAN_PORTS[-1]} on {host} ...")
 
     # 先并发检测哪些端口 TCP 可达
     open_ports = []
@@ -155,19 +177,19 @@ async def scan_ports(host: str = "localhost") -> Optional[int]:
             open_ports.append(port)
 
     if not open_ports:
-        logger.debug("[发现] 端口扫描：所有端口均不可达")
+        _debug("[发现] 端口扫描：所有端口均不可达")
         return None
 
-    logger.debug(f"[发现] TCP 可达端口：{open_ports}")
+    _debug(f"[发现] TCP 可达端口：{open_ports}")
 
     # 对可达端口验证是否为 VTS API
     for port in open_ports:
         if await _is_vts_websocket(host, port):
-            logger.info(f"[发现] 确认 VTube Studio API 在端口 {port}")
+            _info(f"[发现] 确认 VTube Studio API 在端口 {port}")
             return port
 
     # 端口可达但 WebSocket 未响应（VTS 可能刚启动），退而返回第一个开放端口
-    logger.info(f"[发现] 端口 {open_ports[0]} 可达但未确认为 VTS API（可能刚启动），暂用")
+    _info(f"[发现] 端口 {open_ports[0]} 可达但未确认为 VTS API（可能刚启动），暂用")
     return open_ports[0]
 
 
@@ -193,10 +215,10 @@ def read_port_from_config() -> Optional[int]:
                     or data.get("websocketPort")
                 )
                 if port and isinstance(port, int):
-                    logger.info(f"[发现] 从配置文件读取端口: {port}（{path}）")
+                    _info(f"[发现] 从配置文件读取端口: {port}（{path}）")
                     return port
             except Exception as e:
-                logger.debug(f"[发现] 读取配置文件失败 {path}: {e}")
+                _debug(f"[发现] 读取配置文件失败 {path}: {e}")
 
     return None
 
@@ -216,13 +238,13 @@ def is_vts_process_running() -> bool:
         for proc in psutil.process_iter(["name"]):
             try:
                 if proc.info["name"] and proc.info["name"].lower() in target_names:
-                    logger.info(f"[发现] 检测到 VTS 进程: {proc.info['name']}")
+                    _info(f"[发现] 检测到 VTS 进程: {proc.info['name']}")
                     return True
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         return False
     except ImportError:
-        logger.debug("[发现] psutil 未安装，跳过进程检测")
+        _debug("[发现] psutil 未安装，跳过进程检测")
         return False
 
 
@@ -244,7 +266,7 @@ def find_vts_executable() -> Optional[Path]:
         for exe_rel in exe_names:
             exe_path = base / exe_rel
             if exe_path.exists():
-                logger.info(f"[发现] 找到 VTS 安装目录: {base}")
+                _info(f"[发现] 找到 VTS 安装目录: {base}")
                 return exe_path
 
     return None
@@ -283,7 +305,7 @@ def _get_steam_library_dirs(os_name: str) -> List[str]:
                     if values:
                         dirs.append(values[-1].replace("\\\\", "\\"))
         except Exception as e:
-            logger.debug(f"[发现] 读取 libraryfolders.vdf 失败: {e}")
+            _debug(f"[发现] 读取 libraryfolders.vdf 失败: {e}")
 
     return dirs
 
@@ -308,22 +330,22 @@ async def auto_discover(
 
     返回 (host, port)
     """
-    logger.info(f"[发现] 开始自动发现 VTube Studio（系统: {_get_os()}）")
+    _info(f"[发现] 开始自动发现 VTube Studio（系统: {_get_os()}）")
 
     # --- 快速路径：直接试默认端口 ---
     if await _async_port_open(host, VTS_DEFAULT_PORT, timeout=1.0):
         if await _is_vts_websocket(host, VTS_DEFAULT_PORT):
-            logger.info(f"[发现] 默认端口 {VTS_DEFAULT_PORT} 命中")
+            _info(f"[发现] 默认端口 {VTS_DEFAULT_PORT} 命中")
             return host, VTS_DEFAULT_PORT
         # 端口开着但不是 VTS，继续找
-        logger.debug(f"[发现] 端口 {VTS_DEFAULT_PORT} 开着但不是 VTS API，继续扫描")
+        _debug(f"[发现] 端口 {VTS_DEFAULT_PORT} 开着但不是 VTS API，继续扫描")
 
     # --- 读配置文件端口 ---
     config_port = read_port_from_config()
     if config_port and config_port != VTS_DEFAULT_PORT:
         if await _async_port_open(host, config_port, timeout=1.0):
             if await _is_vts_websocket(host, config_port):
-                logger.info(f"[发现] 配置文件端口 {config_port} 命中")
+                _info(f"[发现] 配置文件端口 {config_port} 命中")
                 return host, config_port
 
     # --- 全端口扫描 ---
@@ -336,12 +358,12 @@ async def auto_discover(
     exe_path = find_vts_executable()
 
     if exe_path:
-        logger.info(f"[发现] VTS 安装路径: {exe_path.parent}，但 API 端口未响应")
-        logger.info("[发现] 请确认 VTube Studio 已启动，并在设置中开启了 WebSocket API")
+        _info(f"[发现] VTS 安装路径: {exe_path.parent}，但 API 端口未响应")
+        _info("[发现] 请确认 VTube Studio 已启动，并在设置中开启了 WebSocket API")
     elif not proc_running:
-        logger.info("[发现] 未检测到 VTube Studio 进程，请先启动 VTube Studio")
+        _info("[发现] 未检测到 VTube Studio 进程，请先启动 VTube Studio")
 
-    logger.warning(f"[发现] 自动发现失败，回退到默认 {host}:{VTS_DEFAULT_PORT}")
+    _warning(f"[发现] 自动发现失败，回退到默认 {host}:{VTS_DEFAULT_PORT}")
     return host, VTS_DEFAULT_PORT
 
 

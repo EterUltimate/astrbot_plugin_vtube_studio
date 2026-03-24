@@ -17,6 +17,24 @@ except ImportError:
 
 logger = logging.getLogger("astrbot.plugin.vtube_studio")
 
+# AstrBot 日志格式需要 plugin_tag，添加默认值
+PLUGIN_TAG = "VTS"
+
+
+def _log(level, msg, *args, **kwargs):
+    """封装日志调用，确保包含 plugin_tag"""
+    extra = kwargs.pop("extra", {})
+    extra.setdefault("plugin_tag", PLUGIN_TAG)
+    getattr(logger, level)(msg, *args, extra=extra, **kwargs)
+
+
+def _info(msg, *args, **kwargs):
+    _log("info", msg, *args, **kwargs)
+
+
+def _warning(msg, *args, **kwargs):
+    _log("warning", msg, *args, **kwargs)
+
 
 class VTSClient:
     """VTube Studio WebSocket API 客户端"""
@@ -70,16 +88,16 @@ class VTSClient:
 
     async def _connect(self):
         """建立 WebSocket 连接"""
-        logger.info(f"正在连接 VTube Studio: {self.url}")
+        _info(f"正在连接 VTube Studio: {self.url}")
         self._ws = await websockets.connect(self.url)
-        logger.info("VTube Studio 连接成功")
+        _info("VTube Studio 连接成功")
 
     async def disconnect(self):
         """断开连接"""
         if self._ws and not self._ws.closed:
             await self._ws.close()
         self._ws = None
-        logger.info("已断开与 VTube Studio 的连接")
+        _info("已断开与 VTube Studio 的连接")
 
     # ------------------------------------------------------------------ #
     #  认证
@@ -100,7 +118,7 @@ class VTSClient:
         if resp.get("data", {}).get("authenticationToken"):
             token = resp["data"]["authenticationToken"]
             self.auth_token = token
-            logger.info("成功获取 VTS 认证 Token")
+            _info("成功获取 VTS 认证 Token")
             return token
         raise RuntimeError(f"获取 Token 失败: {resp}")
 
@@ -117,9 +135,9 @@ class VTSClient:
         )
         authenticated = resp.get("data", {}).get("authenticated", False)
         if authenticated:
-            logger.info("VTS 认证成功")
+            _info("VTS 认证成功")
         else:
-            logger.warning(f"VTS 认证失败: {resp}")
+            _warning(f"VTS 认证失败: {resp}")
         return authenticated
 
     async def ensure_authenticated(self, token: Optional[str] = None) -> bool:
@@ -169,7 +187,7 @@ class VTSClient:
         resp = await self._send_request(
             "HotkeyTriggerRequest", {"hotkeyID": hotkey_id}
         )
-        logger.info(f"触发热键: {hotkey_id} -> {resp.get('data', {})}")
+        _info(f"触发热键: {hotkey_id} -> {resp.get('data', {})}")
         return resp.get("data", {})
 
     async def set_expression(
@@ -189,7 +207,7 @@ class VTSClient:
                 "fadeTime": fade_time,
             },
         )
-        logger.info(f"设置表情 {expression_file} active={active} -> {resp.get('data', {})}")
+        _info(f"设置表情 {expression_file} active={active} -> {resp.get('data', {})}")
         return resp.get("data", {})
 
     async def inject_parameters(
@@ -239,7 +257,7 @@ class VTSClient:
                 "size": size,
             },
         )
-        logger.info(f"移动模型 pos=({position_x},{position_y}) rot={rotation} size={size}")
+        _info(f"移动模型 pos=({position_x},{position_y}) rot={rotation} size={size}")
         return resp.get("data", {})
 
     async def create_custom_parameter(
