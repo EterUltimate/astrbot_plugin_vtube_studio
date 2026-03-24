@@ -28,20 +28,91 @@ TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".vts_token")
     "astrbot_plugin_vtube_studio",
     "AstrBot 用户",
     "让 LLM 能够控制 VTube Studio Live2D 模型的动作、表情和参数",
-    "1.1.0",
+    "1.2.0",
 )
 class VTubeStudioPlugin(Star):
     """VTube Studio Live2D 控制插件"""
+
+    # 图形化配置页面
+    WEB_SETTINGS = {
+        "title": "VTube Studio 控制插件",
+        "description": "配置 VTube Studio 连接参数，支持自动发现和手动指定",
+        "sections": [
+            {
+                "title": "连接设置",
+                "settings": [
+                    {
+                        "key": "auto_discover",
+                        "type": "switch",
+                        "label": "自动发现 VTS",
+                        "description": "自动扫描 VTube Studio 的运行地址（推荐开启）",
+                        "default": True,
+                    },
+                    {
+                        "key": "vts_host",
+                        "type": "text",
+                        "label": "VTS 主机地址",
+                        "description": "VTube Studio 的 IP 地址，默认 localhost",
+                        "placeholder": "localhost",
+                        "default": "localhost",
+                    },
+                    {
+                        "key": "vts_port",
+                        "type": "number",
+                        "label": "VTS 端口",
+                        "description": "VTube Studio WebSocket API 端口，默认 8001",
+                        "min": 1,
+                        "max": 65535,
+                        "default": 8001,
+                    },
+                ],
+            },
+            {
+                "title": "插件行为",
+                "settings": [
+                    {
+                        "key": "auto_connect",
+                        "type": "switch",
+                        "label": "启动时自动连接",
+                        "description": "插件启动时自动连接 VTS 并尝试认证",
+                        "default": True,
+                    },
+                    {
+                        "key": "show_status_on_mention",
+                        "type": "switch",
+                        "label": "提及插件时显示状态",
+                        "description": "当用户提及 VTS 相关话题时自动显示连接状态",
+                        "default": False,
+                    },
+                ],
+            },
+            {
+                "title": "调试信息",
+                "settings": [
+                    {
+                        "key": "debug_mode",
+                        "type": "switch",
+                        "label": "调试模式",
+                        "description": "在控制台输出详细的调试日志",
+                        "default": False,
+                    },
+                ],
+            },
+        ],
+    }
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
 
-        # 用户手动指定的 host/port（若配置了则跳过自动发现）
+        # 从 Web 界面配置读取
+        self._auto_discover: bool = self.config.get("auto_discover", True)
         self._manual_host: Optional[str] = self.config.get("vts_host") or None
         self._manual_port: Optional[int] = (
             int(self.config["vts_port"]) if self.config.get("vts_port") else None
         )
+        self._auto_connect: bool = self.config.get("auto_connect", True)
+        self._debug_mode: bool = self.config.get("debug_mode", False)
 
         # 初始先用默认值，initialize() 里会自动发现并更新
         self.vts = VTSClient(
@@ -62,24 +133,33 @@ class VTubeStudioPlugin(Star):
         # 用发现的地址更新客户端
         self.vts.url = f"ws://{host}:{port}"
         self.vts._ws = None  # 重置连接
-        await self._try_connect()
+        
+        # 根据配置决定是否自动连接
+        if self._auto_connect:
+            await self._try_connect()
+        else:
+            logger.info("[VTS] auto_connect 关闭，跳过自动连接")
 
     async def _discover(self) -> tuple:
         """
         确定要连接的 host:port。
         - 若用户在配置里指定了，直接用
-        - 否则调用自动发现
+        - 若 auto_discover 开启，调用自动发现
+        - 否则使用默认地址
         """
+        # 手动指定了地址，直接用
         if self._manual_host and self._manual_port:
             logger.info(
                 f"[VTS] 使用手动配置：{self._manual_host}:{self._manual_port}"
             )
             return self._manual_host, self._manual_port
 
-        logger.info(
-            f"[VTS] 未手动配置，开始自动发现 VTube Studio "
-            f"（当前平台: {platform.system()}）"
-        )
+        # 开启了自动发现
+        if self._auto_discover:
+            logger.info(
+                f"[VTS] 开启自动发现，开始扫描 VTube Studio "
+                f"（当前平台: {platform.system()}）"
+            )
         host, port = await auto_discover(
             host=self._manual_host or DEFAULT_HOST
         )

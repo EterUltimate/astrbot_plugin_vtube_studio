@@ -1,7 +1,7 @@
 name: astrbot_plugin_vtube_studio
 display_name: VTube Studio Live2D 控制插件
-version: 1.0.0
-description: 让 AstrBot 的 LLM 能够控制 VTube Studio 中的 Live2D 模型动作、表情和参数
+version: 1.2.0
+description: 让 AstrBot 的 LLM 能够控制 VTube Studio 中的 Live2D 模型动作、表情和参数，支持 Web 界面图形化配置
 author: AstrBot 用户
 license: MIT
 astrbot_version: ">=4.0"
