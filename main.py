@@ -4,14 +4,12 @@ AstrBot 插件：VTube Studio Live2D 控制
 """
 
 import json
-import os
 import platform
-from pathlib import Path
 from typing import Optional
 
-from astrbot.api.star import Star, Context, register, StarTools
+from astrbot.api.star import Star, Context, register
 from astrbot.api import llm_tool, AstrBotConfig
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
 
 from .vts_client import VTSClient
@@ -20,13 +18,16 @@ from .vts_discovery import auto_discover, get_install_info
 # 默认配置
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8001
+# KV 存储中的 Token 键名
+KV_KEY_TOKEN = "vts_auth_token"
 
 
 @register(
     "astrbot_plugin_vtube_studio",
-    "AstrBot 用户",
-    "让 LLM 能够控制 VTube Studio Live2D 模型的动作、表情和参数",
+    "EterUltimate",
+    "vtube_studio连接支持",
     "1.2.0",
+    "https://github.com/EterUltimate/astrbot_plugin_vtube_studio",
 )
 class VTubeStudioPlugin(Star):
     """VTube Studio Live2D 控制插件"""
@@ -43,15 +44,12 @@ class VTubeStudioPlugin(Star):
         self._auto_connect: bool = self.config.get("auto_connect", True)
         self._debug_mode: bool = self.config.get("debug_mode", False)
 
-        # 使用 StarTools 获取数据存储目录
-        self.token_file = StarTools.get_data_dir() / ".vts_token"
-
-        # 初始先用默认值，initialize() 里会自动发现并更新
+        # 初始化 VTS 客户端
         self.vts = VTSClient(
             host=self._manual_host or DEFAULT_HOST,
             port=self._manual_port or DEFAULT_PORT,
             plugin_name="AstrBot VTS Plugin",
-            plugin_developer="AstrBot",
+            plugin_developer="EterUltimate",
         )
         self._connected = False
 
@@ -62,15 +60,21 @@ class VTubeStudioPlugin(Star):
     async def initialize(self):
         """插件启动时：自动发现 VTS 位置，然后尝试认证连接"""
         host, port = await self._discover()
-        # 用发现的地址更新客户端
         self.vts.url = f"ws://{host}:{port}"
-        self.vts._ws = None  # 重置连接
-        
-        # 根据配置决定是否自动连接
+        self.vts._ws = None
+
         if self._auto_connect:
             await self._try_connect()
         else:
             logger.info("[VTS] auto_connect 关闭，跳过自动连接")
+
+    async def terminate(self):
+        """插件卸载/停用时：断开 VTS 连接，清理资源"""
+        try:
+            await self.vts.disconnect()
+            logger.info("[VTS] 插件已卸载，VTS 连接已关闭")
+        except Exception as e:
+            logger.warning(f"[VTS] 卸载时断开连接失败: {e}")
 
     async def _discover(self) -> tuple:
         """
@@ -79,29 +83,26 @@ class VTubeStudioPlugin(Star):
         - 若 auto_discover 开启，调用自动发现
         - 否则使用默认地址
         """
-        # 手动指定了地址，直接用
         if self._manual_host and self._manual_port:
             logger.info(
                 f"[VTS] 使用手动配置：{self._manual_host}:{self._manual_port}"
             )
             return self._manual_host, self._manual_port
 
-        # 开启了自动发现
         if self._auto_discover:
             logger.info(
                 f"[VTS] 开启自动发现，开始扫描 VTube Studio "
                 f"（当前平台: {platform.system()}）"
             )
-        host, port = await auto_discover(
-            host=self._manual_host or DEFAULT_HOST
-        )
+
+        host, port = await auto_discover(host=self._manual_host or DEFAULT_HOST)
         logger.info(f"[VTS] 自动发现结果：{host}:{port}")
         return host, port
 
     async def _try_connect(self):
         """尝试连接并使用已保存的 Token 认证"""
         try:
-            saved_token = self._load_token()
+            saved_token = await self._load_token()
             if saved_token:
                 ok = await self.vts.authenticate(saved_token)
                 if ok:
@@ -110,63 +111,22 @@ class VTubeStudioPlugin(Star):
                     return
             logger.info("[VTS] 未找到有效 Token，请发送 /vts_auth 进行认证")
         except Exception as e:
-            logger.warning(
-                f"[VTS] 自动连接失败（VTube Studio 可能未启动）: {e}"
-            )
-
-    def _load_token(self) -> Optional[str]:
-        if self.token_file.exists():
-            with open(self.token_file, "r") as f:
-                return f.read().strip() or None
-        return None
-
-    def _save_token(self, token: str):
-        with open(self.token_file, "w") as f:
-            f.write(token)
+            logger.warning(f"[VTS] 自动连接失败（VTube Studio 可能未启动）: {e}")
 
     # ------------------------------------------------------------------ #
-    #  命令：/vts_discover  自动发现
+    #  Token 持久化（使用框架 KV 存储）
     # ------------------------------------------------------------------ #
 
-    @filter.command("vts_discover")
-    async def cmd_vts_discover(self, event: AstrMessageEvent):
-        """重新扫描并自动发现 VTube Studio 的运行地址"""
-        yield event.plain_result(
-            f"🔍 正在扫描 VTube Studio（{platform.system()} 平台）..."
-        )
-        try:
-            # 获取安装信息
-            info = get_install_info()
-            host, port = await auto_discover()
+    async def _load_token(self) -> Optional[str]:
+        """从框架 KV 存储加载 Token"""
+        return await self.get_kv_data(KV_KEY_TOKEN)
 
-            # 更新客户端连接地址
-            self.vts.url = f"ws://{host}:{port}"
-            self.vts._ws = None
-
-            lines = [
-                f"🖥️ 操作系统：{info['os']}",
-                f"📂 安装路径：{info['install_path'] or '未找到'}",
-                f"⚙️ 配置文件端口：{info['config_port'] or '未读取到'}",
-                f"🔄 进程运行中：{'是' if info['process_running'] else '否（需要 psutil）'}",
-                f"",
-                f"✅ 已将连接地址更新为 ws://{host}:{port}",
-                f"",
-                f"如需认证请发送 /vts_auth",
-            ]
-            yield event.plain_result("\n".join(lines))
-
-            # 尝试重新认证
-            saved_token = self._load_token()
-            if saved_token:
-                ok = await self.vts.authenticate(saved_token)
-                if ok:
-                    self._connected = True
-                    yield event.plain_result("🔗 已用保存的 Token 重新认证成功！")
-        except Exception as e:
-            yield event.plain_result(f"❌ 自动发现失败：{e}")
+    async def _save_token(self, token: str):
+        """保存 Token 到框架 KV 存储"""
+        await self.put_kv_data(KV_KEY_TOKEN, token)
 
     # ------------------------------------------------------------------ #
-    #  命令：/vts_auth  认证
+    #  命令
     # ------------------------------------------------------------------ #
 
     @filter.command("vts_auth")
@@ -179,23 +139,54 @@ class VTubeStudioPlugin(Star):
             token = await self.vts.request_auth_token()
             ok = await self.vts.authenticate(token)
             if ok:
-                self._save_token(token)
+                await self._save_token(token)
                 self._connected = True
                 yield event.plain_result(
-                    f"✅ VTube Studio 认证成功！Token 已保存。\n"
-                    f"现在 LLM 可以控制你的 Live2D 模型了。"
+                    "✅ VTube Studio 认证成功！Token 已保存。\n"
+                    "现在 LLM 可以控制你的 Live2D 模型了。"
                 )
             else:
                 yield event.plain_result("❌ 认证失败，请确认已在 VTS 界面点击允许。")
         except Exception as e:
             yield event.plain_result(
-                f"❌ 认证出错：{e}\n请确保 VTube Studio 已启动并开启了 API。\n"
-                f"可先发送 /vts_discover 重新扫描。"
+                f"❌ 认证出错：{e}\n"
+                "请确保 VTube Studio 已启动并开启了 API。\n"
+                "可先发送 /vts_discover 重新扫描。"
             )
 
-    # ------------------------------------------------------------------ #
-    #  命令：/vts_status
-    # ------------------------------------------------------------------ #
+    @filter.command("vts_discover")
+    async def cmd_vts_discover(self, event: AstrMessageEvent):
+        """重新扫描并自动发现 VTube Studio 的运行地址"""
+        yield event.plain_result(
+            f"🔍 正在扫描 VTube Studio（{platform.system()} 平台）..."
+        )
+        try:
+            info = get_install_info()
+            host, port = await auto_discover()
+
+            self.vts.url = f"ws://{host}:{port}"
+            self.vts._ws = None
+
+            lines = [
+                f"🖥️ 操作系统：{info['os']}",
+                f"📂 安装路径：{info['install_path'] or '未找到'}",
+                f"⚙️ 配置文件端口：{info['config_port'] or '未读取到'}",
+                f"🔄 进程运行中：{'是' if info['process_running'] else '否（需要 psutil）'}",
+                "",
+                f"✅ 已将连接地址更新为 ws://{host}:{port}",
+                "",
+                "如需认证请发送 /vts_auth",
+            ]
+            yield event.plain_result("\n".join(lines))
+
+            saved_token = await self._load_token()
+            if saved_token:
+                ok = await self.vts.authenticate(saved_token)
+                if ok:
+                    self._connected = True
+                    yield event.plain_result("🔗 已用保存的 Token 重新认证成功！")
+        except Exception as e:
+            yield event.plain_result(f"❌ 自动发现失败：{e}")
 
     @filter.command("vts_status")
     async def cmd_vts_status(self, event: AstrMessageEvent):
@@ -226,10 +217,6 @@ class VTubeStudioPlugin(Star):
         except Exception as e:
             yield event.plain_result(f"❌ 查询失败：{e}")
 
-    # ------------------------------------------------------------------ #
-    #  命令：/vts_list
-    # ------------------------------------------------------------------ #
-
     @filter.command("vts_list")
     async def cmd_vts_list(self, event: AstrMessageEvent):
         """列出所有热键和表情"""
@@ -245,7 +232,8 @@ class VTubeStudioPlugin(Star):
             lines = ["🎬 **热键列表**"]
             for h in hotkeys:
                 lines.append(
-                    f"  • {h.get('name', '?')}  (ID: {h.get('hotkeyID', '?')}，类型: {h.get('type', '?')})"
+                    f"  • {h.get('name', '?')}  "
+                    f"(ID: {h.get('hotkeyID', '?')}，类型: {h.get('type', '?')})"
                 )
 
             lines.append("\n😊 **表情列表**")
@@ -262,7 +250,9 @@ class VTubeStudioPlugin(Star):
     # ------------------------------------------------------------------ #
 
     @llm_tool(name="vts_trigger_hotkey")
-    async def tool_trigger_hotkey(self, event: AstrMessageEvent, hotkey_id: str):
+    async def tool_trigger_hotkey(
+        self, event: AstrMessageEvent, hotkey_id: str
+    ):
         """
         触发 VTube Studio 中的热键，可以播放动作动画、切换表情、改变待机动画等。
         使用前建议先用 vts_get_hotkeys 获取可用热键列表。
@@ -274,7 +264,10 @@ class VTubeStudioPlugin(Star):
             return "❌ 未连接到 VTube Studio，请先发送 /vts_auth 进行认证。"
         try:
             result = await self.vts.trigger_hotkey(hotkey_id)
-            return f"✅ 已触发热键「{hotkey_id}」。结果：{json.dumps(result, ensure_ascii=False)}"
+            return (
+                f"✅ 已触发热键「{hotkey_id}」。"
+                f"结果：{json.dumps(result, ensure_ascii=False)}"
+            )
         except Exception as e:
             return f"❌ 触发热键失败：{e}"
 
@@ -282,8 +275,6 @@ class VTubeStudioPlugin(Star):
     async def tool_get_hotkeys(self, event: AstrMessageEvent):
         """
         获取 VTube Studio 当前模型可用的所有热键列表（包括动作、表情热键等）。
-
-        Args:
         """
         if not self._connected:
             return "❌ 未连接到 VTube Studio，请先发送 /vts_auth 进行认证。"
@@ -294,7 +285,9 @@ class VTubeStudioPlugin(Star):
             lines = ["当前模型可用热键："]
             for h in hotkeys:
                 lines.append(
-                    f"• 名称: {h.get('name','?')}, ID: {h.get('hotkeyID','?')}, 类型: {h.get('type','?')}"
+                    f"• 名称: {h.get('name','?')}, "
+                    f"ID: {h.get('hotkeyID','?')}, "
+                    f"类型: {h.get('type','?')}"
                 )
             return "\n".join(lines)
         except Exception as e:
@@ -313,16 +306,21 @@ class VTubeStudioPlugin(Star):
         使用前建议先用 vts_get_expressions 获取可用表情列表。
 
         Args:
-            expression_file(string): 表情文件名，例如 "happy.exp3.json" 或 "angry.exp3.json"
+            expression_file(string): 表情文件名，例如 "happy.exp3.json"
             active(boolean): true 表示激活表情，false 表示停用表情，默认 true
             fade_time(number): 淡入淡出时间（秒），默认 0.25
         """
         if not self._connected:
             return "❌ 未连接到 VTube Studio，请先发送 /vts_auth 进行认证。"
         try:
-            result = await self.vts.set_expression(expression_file, active, fade_time)
+            result = await self.vts.set_expression(
+                expression_file, active, fade_time
+            )
             action = "激活" if active else "停用"
-            return f"✅ 已{action}表情「{expression_file}」。结果：{json.dumps(result, ensure_ascii=False)}"
+            return (
+                f"✅ 已{action}表情「{expression_file}」。"
+                f"结果：{json.dumps(result, ensure_ascii=False)}"
+            )
         except Exception as e:
             return f"❌ 设置表情失败：{e}"
 
@@ -330,8 +328,6 @@ class VTubeStudioPlugin(Star):
     async def tool_get_expressions(self, event: AstrMessageEvent):
         """
         获取 VTube Studio 当前模型的所有可用表情列表及其激活状态。
-
-        Args:
         """
         if not self._connected:
             return "❌ 未连接到 VTube Studio，请先发送 /vts_auth 进行认证。"
@@ -399,7 +395,7 @@ class VTubeStudioPlugin(Star):
 
         Args:
             parameter_id(string): 参数名称，例如 "MouthSmile" 或 "FaceAngleX"
-            value(number): 参数值（通常为 -1.0 ~ 1.0，具体范围取决于参数定义）
+            value(number): 参数值（通常为 -1.0 ~ 1.0）
             mode(string): 控制模式，"set" 表示直接设置，"add" 表示叠加，默认 "set"
         """
         if not self._connected:
@@ -417,8 +413,6 @@ class VTubeStudioPlugin(Star):
     async def tool_get_parameters(self, event: AstrMessageEvent):
         """
         获取 VTube Studio 当前模型所有可用的 Live2D 输入参数列表。
-
-        Args:
         """
         if not self._connected:
             return "❌ 未连接到 VTube Studio，请先发送 /vts_auth 进行认证。"
@@ -426,10 +420,13 @@ class VTubeStudioPlugin(Star):
             params = await self.vts.get_input_parameters()
             if not params:
                 return "没有可用参数。"
-            lines = [f"当前模型可用参数（共 {len(params)} 个，显示前30个）："]
+            lines = [
+                f"当前模型可用参数（共 {len(params)} 个，显示前30个）："
+            ]
             for p in params[:30]:
                 lines.append(
-                    f"• {p.get('name','?')} 范围:[{p.get('min','?')}, {p.get('max','?')}] "
+                    f"• {p.get('name','?')} "
+                    f"范围:[{p.get('min','?')}, {p.get('max','?')}] "
                     f"当前值:{p.get('value','?')}"
                 )
             return "\n".join(lines)
@@ -440,8 +437,6 @@ class VTubeStudioPlugin(Star):
     async def tool_model_info(self, event: AstrMessageEvent):
         """
         获取 VTube Studio 当前加载的 Live2D 模型的基本信息。
-
-        Args:
         """
         if not self._connected:
             return "❌ 未连接到 VTube Studio，请先发送 /vts_auth 进行认证。"
