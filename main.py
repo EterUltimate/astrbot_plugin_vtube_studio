@@ -4,64 +4,22 @@ AstrBot 插件：VTube Studio Live2D 控制
 """
 
 import json
-import logging
 import os
 import platform
+from pathlib import Path
 from typing import Optional
 
-from astrbot.api.star import Star, Context, register
+from astrbot.api.star import Star, Context, register, StarTools
 from astrbot.api import llm_tool, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api import logger
 
 from .vts_client import VTSClient
 from .vts_discovery import auto_discover, get_install_info
 
-logger = logging.getLogger("astrbot.plugin.vtube_studio")
-
-# AstrBot 日志格式需要的字段
-PLUGIN_TAG = "VTS"
-
-# 日志级别到 short_levelname 的映射
-LEVEL_MAP = {
-    "debug": "DEBUG",
-    "info": "INFO",
-    "warning": "WARN",
-    "error": "ERROR",
-    "critical": "CRITICAL",
-}
-
-
-def _log(level, msg, *args, **kwargs):
-    """封装日志调用，确保包含 AstrBot 所需的所有字段"""
-    extra = kwargs.pop("extra", {})
-    extra.setdefault("plugin_tag", PLUGIN_TAG)
-    extra.setdefault("short_levelname", LEVEL_MAP.get(level, level.upper()))
-    extra.setdefault("astrbot_version_tag", "")
-    extra.setdefault("source_file", __file__)
-    extra.setdefault("source_line", 0)
-    getattr(logger, level)(msg, *args, extra=extra, **kwargs)
-
-
-def _info(msg, *args, **kwargs):
-    _log("info", msg, *args, **kwargs)
-
-
-def _warning(msg, *args, **kwargs):
-    _log("warning", msg, *args, **kwargs)
-
-
-def _error(msg, *args, **kwargs):
-    _log("error", msg, *args, **kwargs)
-
-
-def _debug(msg, *args, **kwargs):
-    _log("debug", msg, *args, **kwargs)
-
-
 # 默认配置
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8001
-TOKEN_FILE = os.path.join(os.path.dirname(__file__), ".vts_token")
 
 
 @register(
@@ -80,11 +38,13 @@ class VTubeStudioPlugin(Star):
         # 从 Web 界面配置读取
         self._auto_discover: bool = self.config.get("auto_discover", True)
         self._manual_host: Optional[str] = self.config.get("vts_host") or None
-        self._manual_port: Optional[int] = (
-            int(self.config["vts_port"]) if self.config.get("vts_port") else None
-        )
+        port_val = self.config.get("vts_port")
+        self._manual_port: Optional[int] = int(port_val) if port_val else None
         self._auto_connect: bool = self.config.get("auto_connect", True)
         self._debug_mode: bool = self.config.get("debug_mode", False)
+
+        # 使用 StarTools 获取数据存储目录
+        self.token_file = StarTools.get_data_dir() / ".vts_token"
 
         # 初始先用默认值，initialize() 里会自动发现并更新
         self.vts = VTSClient(
@@ -110,7 +70,7 @@ class VTubeStudioPlugin(Star):
         if self._auto_connect:
             await self._try_connect()
         else:
-            _info("[VTS] auto_connect 关闭，跳过自动连接")
+            logger.info("[VTS] auto_connect 关闭，跳过自动连接")
 
     async def _discover(self) -> tuple:
         """
@@ -121,21 +81,21 @@ class VTubeStudioPlugin(Star):
         """
         # 手动指定了地址，直接用
         if self._manual_host and self._manual_port:
-            _info(
+            logger.info(
                 f"[VTS] 使用手动配置：{self._manual_host}:{self._manual_port}"
             )
             return self._manual_host, self._manual_port
 
         # 开启了自动发现
         if self._auto_discover:
-                _info(
-                    f"[VTS] 开启自动发现，开始扫描 VTube Studio "
-                    f"（当前平台: {platform.system()}）"
-                )
+            logger.info(
+                f"[VTS] 开启自动发现，开始扫描 VTube Studio "
+                f"（当前平台: {platform.system()}）"
+            )
         host, port = await auto_discover(
             host=self._manual_host or DEFAULT_HOST
         )
-        _info(f"[VTS] 自动发现结果：{host}:{port}")
+        logger.info(f"[VTS] 自动发现结果：{host}:{port}")
         return host, port
 
     async def _try_connect(self):
@@ -146,22 +106,22 @@ class VTubeStudioPlugin(Star):
                 ok = await self.vts.authenticate(saved_token)
                 if ok:
                     self._connected = True
-                    _info("[VTS] 使用已保存 Token 认证成功")
+                    logger.info("[VTS] 使用已保存 Token 认证成功")
                     return
-            _info("[VTS] 未找到有效 Token，请发送 /vts_auth 进行认证")
+            logger.info("[VTS] 未找到有效 Token，请发送 /vts_auth 进行认证")
         except Exception as e:
-            _warning(
+            logger.warning(
                 f"[VTS] 自动连接失败（VTube Studio 可能未启动）: {e}"
             )
 
     def _load_token(self) -> Optional[str]:
-        if os.path.exists(TOKEN_FILE):
-            with open(TOKEN_FILE, "r") as f:
+        if self.token_file.exists():
+            with open(self.token_file, "r") as f:
                 return f.read().strip() or None
         return None
 
     def _save_token(self, token: str):
-        with open(TOKEN_FILE, "w") as f:
+        with open(self.token_file, "w") as f:
             f.write(token)
 
     # ------------------------------------------------------------------ #
