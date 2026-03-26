@@ -1,0 +1,33 @@
+{
+  "auto_discover": {
+    "description": "自动发现 VTube Studio 的运行地址（推荐开启）",
+    "type": "bool",
+    "default": true
+  },
+  "vts_host": {
+    "description": "VTube Studio 的 IP 地址",
+    "type": "string",
+    "hint": "VTube Studio 所在主机，默认 localhost"
+  },
+  "vts_port": {
+    "description": "VTube Studio WebSocket API 端口",
+    "type": "int",
+    "hint": "默认 8001，可在 VTS 设置→插件 API 中查看",
+    "default": 8001
+  },
+  "auto_connect": {
+    "description": "插件启动时自动连接 VTS 并尝试认证",
+    "type": "bool",
+    "default": true
+  },
+  "show_status_on_mention": {
+    "description": "当用户提及 VTS 相关话题时自动显示连接状态",
+    "type": "bool",
+    "default": false
+  },
+  "debug_mode": {
+    "description": "在控制台输出详细的调试日志",
+    "type": "bool",
+    "default": false
+  }
+}
