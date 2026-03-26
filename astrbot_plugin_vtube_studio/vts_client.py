@@ -17,12 +17,33 @@ except ImportError:
 from astrbot.api import logger
 
 
+class VTSClientError(Exception):
+    """VTS 客户端异常基类"""
+    pass
+
+
+class VTSConnectionError(VTSClientError):
+    """连接异常"""
+    pass
+
+
+class VTSTimeoutError(VTSClientError):
+    """超时异常"""
+    pass
+
+
+class VTSResponseError(VTSClientError):
+    """响应解析异常"""
+    pass
+
+
 class VTSClient:
     """VTube Studio WebSocket API 客户端"""
 
     API_NAME = "VTubeStudioPublicAPI"
     API_VERSION = "1.0"
     DEFAULT_TIMEOUT = 10.0
+    CONNECT_TIMEOUT = 5.0
 
     def __init__(
         self,
@@ -37,6 +58,7 @@ class VTSClient:
         self.auth_token: Optional[str] = None
         self._ws = None
         self._lock = asyncio.Lock()
+        self._is_connected = False
 
     # ------------------------------------------------------------------ #
     #  底层通信
@@ -55,9 +77,16 @@ class VTSClient:
     async def _send_request(
         self, message_type: str, data: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """发送请求并等待响应，超时时强制断开连接防止状态污染"""
+        """
+        发送请求并等待响应。
+        
+        异常处理：
+        - 超时时强制断开连接防止状态污染
+        - JSON 解析失败时抛出明确异常
+        - 连接失败时自动重试一次
+        """
         if websockets is None:
-            raise RuntimeError("请先安装 websockets 库：pip install websockets")
+            raise VTSClientError("请先安装 websockets 库：pip install websockets")
 
         async with self._lock:
             # 如果连接断开则重新建立
@@ -65,30 +94,79 @@ class VTSClient:
                 await self._connect()
 
             payload = self._build_request(message_type, data)
-            await self._ws.send(payload)
+            
+            try:
+                await self._ws.send(payload)
+            except Exception as e:
+                # 发送失败，尝试重连一次
+                logger.warning(f"[VTS] 发送失败，尝试重连: {e}")
+                await self._force_disconnect()
+                await self._connect()
+                await self._ws.send(payload)
             
             try:
                 response_raw = await asyncio.wait_for(
                     self._ws.recv(), timeout=self.DEFAULT_TIMEOUT
                 )
-                return json.loads(response_raw)
             except asyncio.TimeoutError:
                 # 超时时强制断开连接，防止脏数据污染
                 logger.warning("[VTS] 请求超时，强制断开连接以防止状态污染")
                 await self._force_disconnect()
-                raise TimeoutError(
+                raise VTSTimeoutError(
                     f"VTube Studio API 请求超时（{self.DEFAULT_TIMEOUT}秒），"
                     "连接已重置，请检查 VTS 是否响应正常"
                 )
+            
+            # 安全解析 JSON
+            try:
+                return json.loads(response_raw)
+            except json.JSONDecodeError as e:
+                logger.error(f"[VTS] 响应 JSON 解析失败: {e}, 原始响应: {response_raw[:200]}")
+                await self._force_disconnect()
+                raise VTSResponseError(
+                    f"VTube Studio 返回了无效的响应格式: {e}"
+                )
 
     async def _connect(self):
-        """建立 WebSocket 连接"""
+        """
+        建立 WebSocket 连接。
+        
+        异常处理：
+        - 连接超时
+        - 连接拒绝
+        - 其他网络异常
+        """
+        if websockets is None:
+            raise VTSClientError("websockets 库未安装")
+        
         logger.info(f"正在连接 VTube Studio: {self.url}")
-        self._ws = await websockets.connect(self.url)
-        logger.info("VTube Studio 连接成功")
+        
+        try:
+            self._ws = await asyncio.wait_for(
+                websockets.connect(self.url),
+                timeout=self.CONNECT_TIMEOUT
+            )
+            self._is_connected = True
+            logger.info("VTube Studio 连接成功")
+        except asyncio.TimeoutError:
+            self._is_connected = False
+            raise VTSConnectionError(
+                f"连接 VTube Studio 超时（{self.CONNECT_TIMEOUT}秒），"
+                "请确认 VTS 已启动并开启了 API"
+            )
+        except ConnectionRefusedError:
+            self._is_connected = False
+            raise VTSConnectionError(
+                f"连接被拒绝，请确认 VTube Studio 已启动并开启了 WebSocket API "
+                f"（地址: {self.url}）"
+            )
+        except Exception as e:
+            self._is_connected = False
+            raise VTSConnectionError(f"连接 VTube Studio 失败: {e}")
 
     async def _force_disconnect(self):
         """强制断开连接（用于超时后清理）"""
+        self._is_connected = False
         if self._ws and not self._ws.closed:
             try:
                 await self._ws.close()
@@ -105,6 +183,11 @@ class VTSClient:
         """重置连接状态（供外部调用的公开方法）"""
         await self._force_disconnect()
         logger.info("[VTS] 连接已重置")
+
+    @property
+    def is_connected(self) -> bool:
+        """检查连接状态"""
+        return self._is_connected and self._ws is not None and not self._ws.closed
 
     # ------------------------------------------------------------------ #
     #  认证
@@ -127,7 +210,7 @@ class VTSClient:
             self.auth_token = token
             logger.info("成功获取 VTS 认证 Token")
             return token
-        raise RuntimeError(f"获取 Token 失败: {resp}")
+        raise VTSClientError(f"获取 Token 失败: {resp}")
 
     async def authenticate(self, token: str) -> bool:
         """使用已有 Token 进行认证，成功返回 True"""
