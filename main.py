@@ -3,14 +3,18 @@ AstrBot 插件：VTube Studio Live2D 控制
 通过 LLM 工具函数让 AI 能够控制 VTube Studio 中的 Live2D 模型
 """
 
+import asyncio
 import json
 import platform
-from typing import Optional
+import re
+from typing import Any, Optional
 
 from astrbot.api.star import Star, Context, register
 from astrbot.api import llm_tool, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api import logger
+from astrbot.api.provider import ProviderRequest
+from astrbot.core.provider.entities import LLMResponse
 
 from .vts_client import (
     VTSClient,
@@ -24,13 +28,17 @@ from .vts_discovery import auto_discover, get_install_info
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 8001
 KV_KEY_TOKEN = "vts_auth_token"
+L2D_TAG_PATTERN = re.compile(
+    r"<l2d\s*:\s*([^<>]+?)\s*/?>|<l2d>\s*([^<>]+?)\s*</l2d>",
+    re.IGNORECASE,
+)
 
 
 @register(
     "astrbot_plugin_vtube_studio",
     "EterUltimate",
     "vtube_studio连接支持",
-    "1.2.0",
+    "1.2.1",
     "https://github.com/EterUltimate/astrbot_plugin_vtube_studio",
 )
 class VTubeStudioPlugin(Star):
@@ -49,6 +57,7 @@ class VTubeStudioPlugin(Star):
 
         self._auto_connect: bool = self.config.get("auto_connect", True)
         self._debug_mode: bool = self.config.get("debug_mode", False)
+        self._l2d_tasks: set[asyncio.Task] = set()
 
         self.vts = VTSClient(
             host=self._manual_host or DEFAULT_HOST,
@@ -90,6 +99,9 @@ class VTubeStudioPlugin(Star):
     async def terminate(self):
         """插件卸载/停用时：断开 VTS 连接，清理资源"""
         try:
+            for task in list(self._l2d_tasks):
+                task.cancel()
+            self._l2d_tasks.clear()
             await self.vts.disconnect()
             logger.info("[VTS] 插件已卸载，VTS 连接已关闭")
         except Exception as e:
@@ -141,6 +153,178 @@ class VTubeStudioPlugin(Star):
             pass
         self._connected = False
         return False
+
+    # ------------------------------------------------------------------ #
+    #  自主 Live2D 标签机制
+    # ------------------------------------------------------------------ #
+
+    def _get_l2d_entries(self) -> list[dict[str, Any]]:
+        entries = self.config.get("l2d_hotkeys", [])
+        if not isinstance(entries, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("enabled", True):
+                continue
+            tag = str(entry.get("tag", "")).strip()
+            hotkey_id = str(entry.get("hotkey_id", "")).strip()
+            if not tag or not hotkey_id:
+                continue
+            try:
+                duration = max(0.0, float(entry.get("duration", 0) or 0))
+            except (TypeError, ValueError):
+                duration = 0.0
+            normalized.append(
+                {
+                    "tag": tag,
+                    "hotkey_id": hotkey_id,
+                    "description": str(entry.get("description", "")).strip(),
+                    "duration": duration,
+                    "release_after_duration": bool(
+                        entry.get("release_after_duration", True)
+                    ),
+                }
+            )
+        return normalized
+
+    def _l2d_entry_map(self) -> dict[str, dict[str, Any]]:
+        return {entry["tag"].lower(): entry for entry in self._get_l2d_entries()}
+
+    def _parse_l2d_tags(self, text: str) -> tuple[list[str], str]:
+        tags: list[str] = []
+
+        def collect(match: re.Match) -> str:
+            raw = (match.group(1) or match.group(2) or "").strip()
+            for item in re.split(r"[\s,，、|/]+", raw):
+                tag = item.strip()
+                if tag:
+                    tags.append(tag)
+            return ""
+
+        cleaned = L2D_TAG_PATTERN.sub(collect, text)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return tags, cleaned
+
+    def _create_l2d_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._l2d_tasks.add(task)
+        task.add_done_callback(self._l2d_tasks.discard)
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """在模型回复前注入可选 Live2D 标签说明。"""
+        if not self.config.get("autonomous_l2d_enabled", True):
+            return
+
+        entries = self._get_l2d_entries()
+        if not entries:
+            return
+        if not await self._check_and_reconnect():
+            logger.debug("[VTS] 未连接 Live2D，跳过 L2D 标签提示词注入")
+            return
+
+        max_tags = int(self.config.get("l2d_max_tags_per_reply", 1) or 1)
+        max_tags = max(1, max_tags)
+        lines = [
+            "## Live2D 表情控制",
+            "你可以通过在回复末尾输出 Live2D 标签来控制当前 Live2D 模型表情。",
+            "标签只用于控制表情，不是给用户看的内容。正常回答用户，然后在最后单独输出一行标签。",
+            f"格式：<l2d:标签名>。最多选择 {max_tags} 个；多个标签可写成 <l2d:标签1,标签2>。",
+            "如果本次回复不适合使用表情，输出 <l2d:none>。",
+            "不要解释标签，不要编造未列出的标签。",
+            "",
+            "可选表情按键：",
+        ]
+        for entry in entries:
+            desc = entry["description"] or "无额外说明"
+            duration = entry["duration"]
+            duration_text = f"{duration:g} 秒" if duration > 0 else "不自动结束"
+            lines.append(
+                f"- {entry['tag']}: {desc}；持续时间：{duration_text}；热键ID：{entry['hotkey_id']}"
+            )
+
+        req.system_prompt += "\n\n" + "\n".join(lines) + "\n"
+
+    @filter.on_llm_response(priority=2000)
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """截获模型输出的 Live2D 标签，移除标签并异步触发表情热键。"""
+        if not self.config.get("autonomous_l2d_enabled", True):
+            return
+
+        completion_text = getattr(resp, "completion_text", None)
+        if not isinstance(completion_text, str) or "<l2d" not in completion_text.lower():
+            return
+
+        tags, cleaned = self._parse_l2d_tags(completion_text)
+        if cleaned != completion_text:
+            resp.completion_text = cleaned
+
+        tags = [tag for tag in tags if tag.lower() not in {"none", "无", "null", "no"}]
+        if tags:
+            max_tags = int(self.config.get("l2d_max_tags_per_reply", 1) or 1)
+            self._create_l2d_task(self._trigger_l2d_tags(tags[: max(1, max_tags)]))
+
+    async def _trigger_l2d_tags(self, tags: list[str]) -> None:
+        entries = self._l2d_entry_map()
+        if not entries:
+            return
+
+        if not await self._check_and_reconnect():
+            logger.warning("[VTS] 收到 L2D 标签，但 VTube Studio 未连接，已跳过触发")
+            return
+
+        for tag in tags:
+            entry = entries.get(tag.lower())
+            if not entry:
+                logger.warning(f"[VTS] 未配置的 L2D 标签: {tag}")
+                continue
+            await self._trigger_l2d_entry(entry)
+
+    async def _trigger_l2d_entry(self, entry: dict[str, Any]) -> None:
+        hotkey_id = entry["hotkey_id"]
+        try:
+            await self.vts.trigger_hotkey(hotkey_id)
+            logger.info(f"[VTS] L2D 标签 {entry['tag']} 已触发热键 {hotkey_id}")
+        except Exception as e:
+            logger.warning(f"[VTS] L2D 标签 {entry['tag']} 触发失败: {e}")
+            return
+
+        duration = entry["duration"]
+        if duration > 0 and entry["release_after_duration"]:
+            self._create_l2d_task(self._release_l2d_entry(entry, duration))
+
+    async def _release_l2d_entry(self, entry: dict[str, Any], duration: float) -> None:
+        try:
+            await asyncio.sleep(duration)
+            if not await self._check_and_reconnect():
+                return
+            await self.vts.trigger_hotkey(entry["hotkey_id"])
+            logger.info(
+                f"[VTS] L2D 标签 {entry['tag']} 持续 {duration:g} 秒后已再次触发热键"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[VTS] L2D 标签 {entry['tag']} 自动结束失败: {e}")
+
+    @filter.command("vts_l2d_list")
+    async def cmd_vts_l2d_list(self, event: AstrMessageEvent):
+        """列出自主 Live2D 标签配置。"""
+        entries = self._get_l2d_entries()
+        if not entries:
+            yield event.plain_result("当前没有启用的 L2D 标签条目，请先在插件配置中添加。")
+            return
+
+        lines = ["当前启用的 L2D 标签："]
+        for entry in entries:
+            duration = entry["duration"]
+            duration_text = f"{duration:g} 秒" if duration > 0 else "不自动结束"
+            lines.append(
+                f"• <l2d:{entry['tag']}> -> {entry['hotkey_id']} | {duration_text} | "
+                f"{entry['description'] or '无说明'}"
+            )
+        yield event.plain_result("\n".join(lines))
 
     # ------------------------------------------------------------------ #
     #  Token 持久化（使用框架 KV 存储）
