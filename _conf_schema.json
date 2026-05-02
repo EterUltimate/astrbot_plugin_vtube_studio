@@ -20,6 +20,76 @@
     "type": "bool",
     "default": true
   },
+  "autonomous_l2d_enabled": {
+    "description": "启用自主 Live2D 标签表情",
+    "type": "bool",
+    "hint": "开启后，插件会在每次 LLM 回复前注入可选表情标签说明，并在回复后截获 <l2d:标签> 触发对应 VTS 热键",
+    "default": true
+  },
+  "l2d_max_tags_per_reply": {
+    "description": "每次回复最多触发表情数",
+    "type": "int",
+    "hint": "限制模型在一次回复中最多触发多少个 L2D 标签，避免连续触发过多热键",
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    },
+    "default": 1
+  },
+  "l2d_hotkeys": {
+    "description": "Live2D 表情按键条目",
+    "type": "template_list",
+    "hint": "为每个 VTS 热键配置一个给 LLM 使用的标签、说明和持续时间。模型会输出 <l2d:标签>，插件截获后触发对应 hotkey_id",
+    "templates": {
+      "default": {
+        "name": "表情按键",
+        "items": {
+          "tag": {
+            "description": "标签名",
+            "type": "string",
+            "hint": "给 LLM 输出用的短标签，例如 happy、angry、shy。最终格式为 <l2d:happy>",
+            "default": "happy"
+          },
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "hint": "关闭后该标签不会注入给 LLM，也不会响应触发",
+            "default": true
+          },
+          "hotkey_id": {
+            "description": "VTS 热键 ID/名称",
+            "type": "string",
+            "hint": "对应 VTube Studio 当前模型中的热键 ID 或名称，可用 /vts_list 查看",
+            "default": ""
+          },
+          "description": {
+            "description": "表情说明",
+            "type": "text",
+            "hint": "描述这个表情适合什么语气、情绪或场景，LLM 会根据说明自主选择",
+            "default": "开心、赞同、轻松回应时使用"
+          },
+          "duration": {
+            "description": "持续时间（秒）",
+            "type": "float",
+            "hint": "大于 0 且开启自动结束时，插件会在持续时间后再次触发同一个热键，适合开关型表情热键。设为 0 表示只触发一次",
+            "slider": {
+              "min": 0,
+              "max": 30,
+              "step": 0.5
+            },
+            "default": 3
+          },
+          "release_after_duration": {
+            "description": "持续后再次触发",
+            "type": "bool",
+            "hint": "适合 VTS 中按一次开启、再按一次关闭的表情热键；如果是一次性动作热键，建议关闭",
+            "default": true
+          }
+        }
+      }
+    }
+  },
   "show_status_on_mention": {
     "description": "当用户提及 VTS 相关话题时自动显示连接状态",
     "type": "bool",
