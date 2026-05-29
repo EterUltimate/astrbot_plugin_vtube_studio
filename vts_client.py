@@ -83,7 +83,7 @@ class VTSClient:
 
         async with self._lock:
             # 如果连接断开则重新建立
-            if self._ws is None or self._ws.closed:
+            if self._ws is None or not self.is_connected:
                 await self._connect()
 
             payload = self._build_request(message_type, data)
@@ -150,7 +150,7 @@ class VTSClient:
     async def _force_disconnect(self):
         """强制断开连接"""
         self._is_connected = False
-        if self._ws and not self._ws.closed:
+        if self._ws:
             try:
                 await self._ws.close()
             except Exception:
@@ -170,7 +170,19 @@ class VTSClient:
     @property
     def is_connected(self) -> bool:
         """检查连接状态"""
-        return self._is_connected and self._ws is not None and not self._ws.closed
+        if self._ws is None:
+            return False
+        if not self._is_connected:
+            return False
+        try:
+            if hasattr(self._ws, 'closed'):
+                return not self._ws.closed
+            elif hasattr(self._ws, 'state'):
+                from websockets import State
+                return self._ws.state == State.OPEN
+            return True
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------ #
     #  认证
