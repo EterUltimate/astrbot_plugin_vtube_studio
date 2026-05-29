@@ -1009,7 +1009,8 @@ class VTubeStudioPlugin(Star):
         prompt += self._build_bili_support_reply_hint(events[-max_events:])
         if self.config.get("bili_live_auto_reply_force_full_tts", True):
             prompt += (
-                "\n\n本次回复需要包含语音消息。"
+                "\n\n请只输出普通文本回复，不要调用工具，不要写 <record>、<voice>、"
+                "<语音>、<send_message_to_user> 等标签；如果需要语音，系统 TTS 插件会自动处理。"
             )
 
         try:
@@ -1071,7 +1072,10 @@ class VTubeStudioPlugin(Star):
         )
         prompt += self._build_bili_support_reply_hint(events[-max_events:])
         if self.config.get("bili_live_auto_reply_force_full_tts", True):
-            prompt += "\n\n本次回复需要包含语音消息。"
+            prompt += (
+                "\n\n请只输出普通文本回复，不要调用工具，不要写 <record>、<voice>、"
+                "<语音>、<send_message_to_user> 等标签；如果需要语音，系统 TTS 插件会自动处理。"
+            )
 
         try:
             synthetic_event = SyntheticBiliLiveWakeEvent(
@@ -1239,9 +1243,8 @@ class VTubeStudioPlugin(Star):
         cleaned = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip().strip('"“”')
+        cleaned = self._strip_bili_reply_control_markup(cleaned)
         cleaned = self._strip_bili_meta_reply_lines(cleaned)
-        if "<tts>" in cleaned.lower():
-            return cleaned
         max_length = self._safe_parse_int(
             self.config.get("bili_live_auto_reply_max_length"), 80
         )
@@ -1259,6 +1262,29 @@ class VTubeStudioPlugin(Star):
                 continue
             kept.append(line)
         return "\n".join(kept).strip()
+
+    def _strip_bili_reply_control_markup(self, text: str) -> str:
+        cleaned = str(text or "")
+        if not cleaned:
+            return ""
+
+        cleaned = re.sub(
+            r"(?is)<\s*(send_message_to_user|astrbot_execute_shell|astrbot_execute_python)\b.*$",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(r"(?is)<\s*message\s*>(.*?)<\s*/\s*message\s*>", r"\1", cleaned)
+        cleaned = re.sub(
+            r"(?is)<\s*(record|voice|tts|\u8bed\u97f3)\b[^>]*>(.*?)<\s*/\s*\1\s*>",
+            r"\2",
+            cleaned,
+        )
+        cleaned = re.sub(r"(?is)<\s*/?\s*(record|voice|tts|\u8bed\u97f3|message)\b[^>]*>", "", cleaned)
+        cleaned = re.sub(r"(?is)<\s*/?\s*parameter\b[^>]*>", "", cleaned)
+        cleaned = re.sub(r"(?is)<[^>\n]{1,120}>", "", cleaned)
+        cleaned = re.sub(r"\[语音\]|\[voice\]|\[record\]", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
     def _is_bili_meta_reply_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", str(line or ""))
@@ -1297,7 +1323,7 @@ class VTubeStudioPlugin(Star):
         return cleaned_chain or chain
 
     def _strip_tts_blocks_from_text(self, text: str) -> str:
-        cleaned = re.sub(r"(?is)<tts>.*?</tts>", "", str(text or ""))
+        cleaned = self._strip_bili_reply_control_markup(str(text or ""))
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         return cleaned
 
